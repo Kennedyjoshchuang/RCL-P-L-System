@@ -3,6 +3,8 @@
 Dashboard laporan kegiatan **PT. Raya Cakrawala Logistik**. Data dibaca langsung (live) dari Google Sheets.
 
 ## Halaman
+- **Login** — saat pertama dibuka, buat akun admin; setelah itu masuk dengan username & password
+- **Pengguna** (admin) — tambah pengguna, hapus pengguna, atur ulang password
 - **P/L** — sales, cost, margin per Job Order, kontainer dikerjakan, biaya per vendor & jenis
 - **Piutang / Hutang** — outstanding, umur piutang/hutang, status jatuh tempo
 - **Invoice** — generate invoice per JO dengan kop surat, bisa diedit + catatan, cetak / simpan PDF
@@ -20,4 +22,4 @@ lalu buka http://localhost:5173/dashboard-rcl.html.
 ## Konfigurasi
 Atur `CONFIG.SHEET_ID` di bagian `<script>` pada `dashboard-rcl.html`. Spreadsheet harus dibagikan sebagai **Anyone with the link · Viewer**.
 
-Draf invoice/quotation dan data kop surat disimpan di browser (localStorage) masing-masing pengguna.
+Draf invoice/quotation, data kop surat, dan akun pengguna disimpan di browser (localStorage) masing-masing perangkat. Password disimpan sebagai hash SHA-256 bergaram. Login ini bersifat pengaman tampilan di sisi browser, bukan autentikasi server.
