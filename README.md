@@ -20,7 +20,7 @@ npm run dev
 lalu buka http://localhost:5173/. Server lokal menyimpan akun di `server/data/` (tidak ikut di-commit).
 
 ## Produksi
-- `server/auth-server.js` berjalan sebagai service (port 3218, hanya localhost) dan menangani `/api/*`: login, logout, dan kelola pengguna.
+- `server/auth-server.js` berjalan sebagai service (port 3223, hanya localhost) dan menangani `/api/*`: login, logout, dan kelola pengguna.
 - nginx menyajikan `dashboard-rcl.html` + `assets/` dan meneruskan `/api/` ke service tersebut.
 - Akun: `DATA_DIR/users.json` (password di-hash scrypt). Sesi: cookie HttpOnly bertanda tangan, 30 hari dengan "Ingat saya". Mengatur ulang password mengeluarkan pengguna dari semua perangkat.
 - 5 kali salah password per username → dikunci 5 menit.
