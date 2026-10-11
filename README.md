@@ -3,7 +3,7 @@
 Dashboard laporan kegiatan **PT. Raya Cakrawala Logistik**. Data dibaca langsung (live) dari Google Sheets.
 
 ## Halaman
-- **Login** — saat pertama dibuka, buat akun admin; setelah itu masuk dengan username & password
+- **Login** — akun disimpan di server dan sama untuk semua perangkat. Saat server pertama kali dipakai, buat akun admin; setelah itu semua orang masuk dengan username & password dari admin
 - **Pengguna** (admin) — tambah pengguna, hapus pengguna, atur ulang password
 - **P/L** — sales, cost, margin per Job Order, kontainer dikerjakan, biaya per vendor & jenis
 - **Piutang / Hutang** — outstanding, umur piutang/hutang, status jatuh tempo
@@ -11,15 +11,21 @@ Dashboard laporan kegiatan **PT. Raya Cakrawala Logistik**. Data dibaca langsung
 - **Quotation** — surat penawaran harga dengan kop surat, cetak / simpan PDF
 
 ## Cara menjalankan
-Buka `dashboard-rcl.html` di browser (klik dua kali), atau jalankan server lokal:
+Butuh Node.js 18+ (tanpa `npm install`, tidak ada dependency).
 
 ```bash
-npx http-server -p 5173
+npm run dev
 ```
 
-lalu buka http://localhost:5173/dashboard-rcl.html.
+lalu buka http://localhost:5173/. Server lokal menyimpan akun di `server/data/` (tidak ikut di-commit).
+
+## Produksi
+- `server/auth-server.js` berjalan sebagai service (port 3218, hanya localhost) dan menangani `/api/*`: login, logout, dan kelola pengguna.
+- nginx menyajikan `dashboard-rcl.html` + `assets/` dan meneruskan `/api/` ke service tersebut.
+- Akun: `DATA_DIR/users.json` (password di-hash scrypt). Sesi: cookie HttpOnly bertanda tangan, 30 hari dengan "Ingat saya". Mengatur ulang password mengeluarkan pengguna dari semua perangkat.
+- 5 kali salah password per username → dikunci 5 menit.
 
 ## Konfigurasi
 Atur `CONFIG.SHEET_ID` di bagian `<script>` pada `dashboard-rcl.html`. Spreadsheet harus dibagikan sebagai **Anyone with the link · Viewer**.
 
-Draf invoice/quotation, data kop surat, dan akun pengguna disimpan di browser (localStorage) masing-masing perangkat. Password disimpan sebagai hash SHA-256 bergaram. Login ini bersifat pengaman tampilan di sisi browser, bukan autentikasi server.
+Draf invoice/quotation dan data kop surat disimpan di browser (localStorage) masing-masing perangkat.

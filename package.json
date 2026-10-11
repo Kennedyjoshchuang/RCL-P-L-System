@@ -1,0 +1,10 @@
+{
+  "name": "rcl-pl-system",
+  "private": true,
+  "description": "RCL P/L dashboard + shared login server",
+  "scripts": {
+    "start": "node server/auth-server.js",
+    "dev": "STATIC_DIR=. COOKIE_SECURE=false DATA_DIR=./server/data PORT=5173 node server/auth-server.js"
+  },
+  "engines": { "node": ">=18" }
+}
