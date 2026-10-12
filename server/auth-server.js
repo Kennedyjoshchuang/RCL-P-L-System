@@ -27,6 +27,21 @@ function saveUsers(list) {
   fs.writeFileSync(tmp, JSON.stringify(list, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, USERS_FILE);
 }
+// Seed a default admin from env when there are no users yet, so the
+// "Buat akun admin" setup screen never appears. Password comes from env only (never committed).
+function seedAdmin() {
+  const user = normUser(process.env.ADMIN_USER || ""), pw = process.env.ADMIN_PASSWORD || "";
+  if (!user || !pw) return;
+  const list = loadUsers();
+  const existing = list.find(x => x.u === user);
+  if (existing) {
+    if (process.env.ADMIN_RESET === "true" && !checkPw(pw, existing.hash)) { existing.hash = hashPw(pw); existing.role = "admin"; existing.ver = (existing.ver || 0) + 1; saveUsers(list); console.log(`admin @${user} password reset from env`); }
+    return;
+  }
+  list.push({ u: user, name: process.env.ADMIN_NAME || "Admin", role: "admin", hash: hashPw(pw), ver: 0, created: new Date().toISOString() });
+  saveUsers(list); console.log(`seeded admin @${user}`);
+}
+
 const pub = u => ({ u: u.u, name: u.name, role: u.role, created: u.created });
 
 /* ---------- passwords (scrypt) ---------- */
@@ -196,4 +211,5 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+seedAdmin();
 server.listen(PORT, HOST, () => console.log(`rcl-pl auth on ${HOST}:${PORT}, data ${DATA_DIR}`));
