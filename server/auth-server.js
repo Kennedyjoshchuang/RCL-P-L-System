@@ -125,7 +125,7 @@ function serveStatic(req, res, pathname) {
   if (!f.startsWith(STATIC_DIR) || /[\\/](server|\.git)([\\/]|$)/.test(f.slice(STATIC_DIR.length))) return send(res, 404, { error: "not found" });
   fs.readFile(f, (err, buf) => {
     if (err) return send(res, 404, { error: "not found" });
-    res.writeHead(200, { "Content-Type": MIME[path.extname(f)] || "application/octet-stream" }); res.end(buf);
+    res.writeHead(200, { "Content-Type": MIME[path.extname(f)] || "application/octet-stream", "Cache-Control": "no-cache" }); res.end(buf);
   });
 }
 

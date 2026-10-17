@@ -500,6 +500,7 @@ table.items td:nth-child(4){white-space:nowrap}
       <div class="side-row">
         <label for="interval" class="small" style="color:inherit">Auto</label>
         <select id="interval">
+          <option value="15">tiap 15 detik</option>
           <option value="30">tiap 30 detik</option>
           <option value="60">tiap 1 menit</option>
           <option value="300">tiap 5 menit</option>
@@ -542,18 +543,21 @@ document.getElementById("logoFull").src=LOGO_FULL;document.getElementById("logoM
    KONFIGURASI
    ---------------------------------------------------------
    SHEET_ID  : ID Google Spreadsheet (bagian di antara /d/ dan /edit pada link)
-   SHEETS    : daftar tab cadangan. Tab baru di spreadsheet akan otomatis
-               muncul di sidebar saat dashboard dibuka lewat http(s).
-               gid = angka setelah "gid=" pada link tab di Google Sheets.
+   SHEETS    : halaman dashboard dan tab spreadsheet yang dibaca.
+               name = nama halaman, tab = nama tab di spreadsheet,
+               kind = jenis data (pl / ar / ap).
+               gid  = cadangan bila nama tab tidak bisa dicari
+                      (angka setelah "gid=" pada link tab).
+               Rincian biaya per JO di halaman P/L diambil dari tab AP.
    ========================================================= */
 const CONFIG = {
   SHEET_ID: "1W1FQCTSYdop9HMhvN2t7k-xUYo55mAHH2p9QSx6y1Zw",
   SHEETS: [
-    { name: "P/L",     gid: "0" },
-    { name: "Piutang", gid: "1925703022" },
-    { name: "Hutang",  gid: "426513768" }
+    { name: "P/L",     tab: "PL", kind: "pl", gid: "901012587" },
+    { name: "Piutang", tab: "AR", kind: "ar", gid: "1339016650" },
+    { name: "Hutang",  tab: "AP", kind: "ap", gid: "1408707520" }
   ],
-  DEFAULT_REFRESH_SEC: 60
+  DEFAULT_REFRESH_SEC: 15
 };
 
 const BASE = `https://docs.google.com/spreadsheets/d/${CONFIG.SHEET_ID}`;
@@ -600,13 +604,21 @@ function parseNum(v){
   const n = parseFloat(s);
   return isNaN(n) ? null : (neg ? -n : n);
 }
-function parseDate(v){
+/* mdy = true untuk tanggal format bulan/hari/tahun (tab AR/AP); otomatis ditukar bila tidak mungkin */
+function parseDate(v, mdy = false){
   if (!v) return null;
   const s = String(v).trim();
   let m = s.match(/^Date\((\d+),(\d+),(\d+)/);
   if (m) return new Date(+m[1], +m[2], +m[3]);
   m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
-  if (m){ let y = +m[3]; if (y < 100) y += 2000; const d = new Date(y, +m[2]-1, +m[1]); return isNaN(d) ? null : d; }
+  if (m){
+    let y = +m[3]; if (y < 100) y += 2000;
+    let dd = +m[1], mm = +m[2];
+    if (mdy) [dd, mm] = [mm, dd];
+    if (mm > 12 && dd <= 12) [dd, mm] = [mm, dd];
+    if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+    const d = new Date(y, mm-1, dd); return isNaN(d) ? null : d;
+  }
   m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (m) return new Date(+m[1], +m[2]-1, +m[3]);
   return null;
@@ -667,12 +679,13 @@ async function discoverSheets(){
   try {
     const r = await fetch(`${BASE}/htmlview?_=${Date.now()}`, { cache: "no-store" });
     const t = await r.text();
-    const out = [], seen = new Set();
+    const gidOf = {};
     for (const m of t.matchAll(/\{name: "((?:[^"\\]|\\.)*)", pageUrl: "[^"]*?gid=(\d+)/g)){
-      if (seen.has(m[2])) continue; seen.add(m[2]);
-      out.push({ name: JSON.parse('"' + m[1] + '"'), gid: m[2] });
+      const name = norm(JSON.parse('"' + m[1] + '"'));
+      if (!(name in gidOf)) gidOf[name] = m[2];
     }
-    return out.length ? out : null;
+    // hanya tab yang ada di CONFIG.SHEETS; gid dicari dari nama tab agar tetap benar bila tab dibuat ulang
+    return CONFIG.SHEETS.map(sh => ({ ...sh, gid: gidOf[norm(sh.tab)] || sh.gid }));
   } catch(e){ return null; }
 }
 
@@ -687,86 +700,87 @@ function detectKind(rows){
 }
 
 function interpretPL(rows){
-  const hi = rows.findIndex(r => norm(r[0]).startsWith("NO") && r.map(norm).some(c => c.includes("ORDER")));
+  const hi = rows.findIndex(r => r.map(norm).some(c => c === "ORDER NO." || c === "ORDER NO" || c === "NO. ORDER" || c === "NO ORDER"));
+  if (hi < 0) return { jobs: [], cols: [], sumRow: null };
   const head = rows[hi].map(norm);
   const col = (...keys) => { for (const k of keys){ const i = head.findIndex(h => h === k); if (i >= 0) return i; } for (const k of keys){ const i = head.findIndex(h => h.includes(k)); if (i >= 0) return i; } return -1; };
   const C = {
-    order: col("NO. ORDER","ORDER"), date: col("TGL STUFFING/BONGKAR","TGL"), ship: col("DO/KAPAL","KAPAL"), desc: col("DESKRIPSI"),
-    vendor: col("COSTING DIBAYAR KE","DIBAYAR KE"), cname: col("NAMA BIAYA"), qty: col("JML","QTY"), size: col("SIZE"),
-    sales: col("SALES"), cost: col("COST"), vat: col("VAT","PPN"), total: col("TOTAL COST"), margin: col("MARGIN"),
-    rcl: col("RCL INVOICE NO.","RCL INVOICE"), vinv: col("VENDOR INVOICE")
+    order: col("ORDER NO.","NO. ORDER","ORDER"), date: col("STUFFING DATE","TGL STUFFING/BONGKAR","DATE"), ship: col("DO/SHIP","DO/KAPAL","SHIP"), desc: col("DESCRIPTION","DESKRIPSI"),
+    qty: col("QTY","JML"), size: col("SIZE"), rcl: col("INVOICE NO.","INVOICE"),
+    sales: col("TOTAL SALES"), salesVat: col("SALES/OUTPUT VAT","OUTPUT VAT"), receivable: col("NET RECEIVABLE"),
+    cost: col("EXPENSE"), costVat: col("INPUT VAT"), payable: col("NET PAYABLE"), profit: col("PROFIT"), margin: col("MARGIN")
   };
   const g = (r, k) => C[k] >= 0 ? String(r[C[k]] ?? "").trim() : "";
-  const jobs = []; let cur = null;
+  const jobs = [];
   for (let i = hi + 1; i < rows.length; i++){
     const r = rows[i];
-    if (blank(r)) continue;
-    const a = norm(r[C.order]);
-    if (a.startsWith("NO") && a.includes("ORDER")) { cur = null; continue; }   // header ulang
-    if (g(r,"order")){
-      cur = { id: g(r,"order"), dateRaw: g(r,"date"), date: parseDate(g(r,"date")), ship: g(r,"ship"), desc: g(r,"desc"),
-              qty: parseNum(g(r,"qty")), size: g(r,"size"), salesRaw: null, marginSheet: null, rcl: g(r,"rcl"), lines: [] };
-      jobs.push(cur);
-    }
-    if (!cur) continue;
-    const s = parseNum(g(r,"sales")); if (s != null) cur.salesRaw = (cur.salesRaw || 0) + s;
-    const mg = parseNum(g(r,"margin")); if (mg != null) cur.marginSheet = (cur.marginSheet || 0) + mg;
-    if (!cur.rcl && g(r,"rcl")) cur.rcl = g(r,"rcl");
-    if (!cur.qty && g(r,"qty")) cur.qty = parseNum(g(r,"qty"));
-    if (!cur.size && g(r,"size")) cur.size = g(r,"size");
-    const cost = parseNum(g(r,"cost")), vat = parseNum(g(r,"vat")), tot = parseNum(g(r,"total"));
-    if (g(r,"vendor") || g(r,"cname") || cost != null || tot != null){
-      cur.lines.push({ vendor: g(r,"vendor"), name: g(r,"cname"), cost, vat, total: tot != null ? tot : (cost == null && vat == null ? null : (cost || 0) + (vat || 0)), vinv: g(r,"vinv") });
-    }
+    if (blank(r) || !g(r,"order")) continue;
+    if (norm(g(r,"order")) === head[C.order]) continue;   // header ulang
+    jobs.push({ id: g(r,"order"), dateRaw: g(r,"date"), date: parseDate(g(r,"date")), ship: g(r,"ship"), desc: g(r,"desc"),
+      qty: parseNum(g(r,"qty")), size: g(r,"size"), rcl: cleanRef(g(r,"rcl")),
+      sales: parseNum(g(r,"sales")), receivable: parseNum(g(r,"receivable")),
+      costSheet: parseNum(g(r,"cost")), payable: parseNum(g(r,"payable")), profitSheet: parseNum(g(r,"profit")), lines: [], raw: r });
   }
-  for (const j of jobs){
-    j.totalCost = j.lines.reduce((s,l) => s + (l.total || 0), 0);
-    j.sales = j.salesRaw;
-    j.margin = j.marginSheet != null ? j.marginSheet : (j.sales != null ? j.sales - j.totalCost : null);
+  return { jobs, idx: { sales: C.sales, cost: C.cost, profit: C.profit }, cols: headerCols(rows, hi), sumRow: hi > 0 && !blank(rows[hi-1]) ? rows[hi-1] : null };
+}
+/* "TBA", "-" dan sejenisnya dianggap kosong */
+const cleanRef = s => /^(TBA|-+|—|N\/?A)$/i.test(String(s || "").trim()) ? "" : String(s || "").trim();
+
+/* lengkapi job P/L dengan rincian biaya dari tab AP dan nama customer dari tab AR */
+function finishPL(pl, ap, ar){
+  for (const j of pl.jobs){
+    j.lines = ap ? ap.items.filter(x => norm(x.order) === norm(j.id)).map(x => ({ vendor: x.party, name: x.desc, cost: x.expense, vat: x.vat, total: x.expense, net: x.amount, vinv: x.inv })) : [];
+    const cust = ar && ar.items.find(x => norm(x.order) === norm(j.id));
+    j.customer = cust ? cust.party : "";
+    j.totalCost = j.costSheet != null ? j.costSheet : j.lines.reduce((s,l) => s + (l.total || 0), 0);
+    j.margin = j.profitSheet != null ? j.profitSheet : (j.sales != null ? j.sales - j.totalCost : null);
     j.marginPct = j.sales ? j.margin / j.sales : null;
     j.pendingCost = j.lines.filter(l => !l.total).length;
     j.status = j.sales == null ? { t: "Sales belum diisi", c: "p-warn" }
              : j.margin < 0 ? { t: "Rugi", c: "p-crit" }
-             : j.pendingCost ? { t: "Biaya belum lengkap", c: "p-serious" }
+             : !j.totalCost ? { t: "Biaya belum diisi", c: "p-serious" }
              : { t: "Profit", c: "p-good" };
   }
-  return { jobs };
+  return pl;
 }
 
-function interpretInv(rows, sheetName){
+function interpretInv(rows, kind){
   const hi = rows.findIndex(r => r.map(norm).some(c => c.includes("INVOICE")));
+  if (hi < 0) return { items: [], partyLabel: kind === "ar" ? "Customer" : "Vendor", kind, cols: [], sumRow: null };
   const head = rows[hi].map(norm);
-  const find = (...keys) => { for (const k of keys){ const i = head.findIndex(h => h === k || h.includes(k)); if (i >= 0) return i; } return -1; };
-  const C = { inv: find("INVOICE NUMBER","INVOICE NO","NO. INVOICE","INVOICE"), party: find("VENDOR","CUSTOMER","PELANGGAN","SUPPLIER","NAMA"),
-              date: head.findIndex(h => h === "DATE" || h === "TANGGAL" || h === "TGL" || h === "INVOICE DATE"), due: find("DUE DATE","JATUH TEMPO","DUE"),
-              amt: find("AMOUNT","JUMLAH","NILAI","TOTAL"), paid: find("PAID","DIBAYAR","TERBAYAR","PAYMENT"), status: find("STATUS","KETERANGAN") };
-  // posisi default template (No | Invoice Number | Vendor | Date | Due Date | Amount) bila teks header tidak terbaca
-  const DEF = { inv: 1, party: 2, date: 3, due: 4, amt: 5 };
-  for (const k in DEF) if (C[k] < 0) C[k] = DEF[k];
-  const partyLabel = String(rows[hi][C.party] || "").trim() || "Vendor";
+  const find = (...keys) => { for (const k of keys){ const i = head.findIndex(h => h === k); if (i >= 0) return i; } for (const k of keys){ const i = head.findIndex(h => h.includes(k)); if (i >= 0) return i; } return -1; };
+  const C = { inv: find("INVOICE NUMBER","INVOICE NO","NO. INVOICE"), party: find("CUSTOMER","VENDOR","PELANGGAN","SUPPLIER","NAMA"),
+              order: find("ORDER NUMBER","ORDER NO.","NO. ORDER"), desc: find("DESC","DESKRIPSI","DESCRIPTION"),
+              date: find("INVOICE DATE","DATE","TANGGAL","TGL"), due: find("DUE DATE","JATUH TEMPO","DUE"),
+              amt: find("NET RECEIVABLE","NET PAYABLE","AMOUNT","JUMLAH","NILAI"),
+              expense: find("EXPENSE","TOTAL SALES"), vat: find("INPUT VAT","SALES/OUTPUT VAT","OUTPUT VAT"),
+              paid: head.findIndex(h => /^(PAID|AMOUNT PAID|PAID AMOUNT|DIBAYAR|TERBAYAR|PAYMENT)$/.test(h)), status: find("STATUS","KETERANGAN") };
+  // kolom PAID dicocokkan persis agar PREPAID WHT tidak terbaca sebagai pembayaran
+  const partyLabel = String(rows[hi][C.party] || "").trim() || (kind === "ar" ? "Customer" : "Vendor");
   const today = new Date(); today.setHours(0,0,0,0);
   const items = [];
   for (let i = hi + 1; i < rows.length; i++){
     const r = rows[i]; const g = k => C[k] >= 0 ? String(r[C[k]] ?? "").trim() : "";
     const amount = parseNum(g("amt"));
-    if (!g("inv") && amount == null && !g("party")) continue;
+    if (!g("party") && !g("order")) continue;   // baris kosong (hanya nomor urut)
     const paidAmt = C.paid >= 0 ? parseNum(g("paid")) : null;
     const statusTxt = norm(g("status"));
     const isPaid = /LUNAS|PAID|SELESAI|CLOSED/.test(statusTxt) || (paidAmt != null && amount != null && paidAmt >= amount && amount > 0);
     const outstanding = isPaid ? 0 : Math.max(0, (amount || 0) - (paidAmt || 0));
-    const date = parseDate(g("date")), due = parseDate(g("due"));
+    const date = parseDate(g("date"), true), due = parseDate(g("due"), true);
     const days = due ? Math.round((today - due) / 864e5) : null;   // >0 = lewat jatuh tempo
     let bucket, pill;
     if (isPaid){ bucket = "paid"; pill = { t: "Lunas", c: "p-good" }; }
+    else if (!amount){ bucket = "zero"; pill = { t: "Belum ada nilai", c: "p-muted" }; }
     else if (days == null){ bucket = "nodue"; pill = { t: "Tanpa jatuh tempo", c: "p-muted" }; }
     else if (days <= 0){ bucket = "current"; pill = { t: days === 0 ? "Jatuh tempo hari ini" : `${-days} hari lagi`, c: days >= -7 ? "p-warn" : "p-good" }; }
     else if (days <= 30){ bucket = "b30"; pill = { t: `Lewat ${days} hari`, c: "p-warn" }; }
     else if (days <= 60){ bucket = "b60"; pill = { t: `Lewat ${days} hari`, c: "p-serious" }; }
     else { bucket = days <= 90 ? "b90" : "b90p"; pill = { t: `Lewat ${days} hari`, c: "p-crit" }; }
-    items.push({ inv: g("inv"), party: g("party"), date, due, amount, outstanding, isPaid, days, bucket, pill, statusTxt: g("status") });
+    items.push({ inv: cleanRef(g("inv")), party: g("party"), order: g("order"), desc: g("desc"), date, due, amount, expense: parseNum(g("expense")), vat: parseNum(g("vat")),
+                 outstanding, isPaid, days, bucket, pill, statusTxt: g("status"), raw: r });
   }
-  const stamp = rows.slice(0, hi).flat().map(String).find(s => parseDate(s));
-  return { items, partyLabel, stamp, kind: /hutang|payable|ap\b/i.test(sheetName) ? "ap" : "ar" };
+  return { items, partyLabel, kind, cols: headerCols(rows, hi), sumRow: hi > 0 && !blank(rows[hi-1]) ? rows[hi-1] : null };
 }
 
 /* ---------------- state ---------------- */
@@ -801,7 +815,7 @@ function renderNav(){
     if (d?.kind === "pl") tag = `<span class="tag">${d.pl.jobs.length} job</span>`;
     if (d?.kind === "inv"){
       const od = d.inv.items.filter(x => !x.isPaid && x.days > 0).length;
-      tag = od ? `<span class="tag alert" title="Lewat jatuh tempo">${od}</span>` : `<span class="tag">${d.inv.items.length}</span>`;
+      tag = od ? `<span class="tag alert" title="Lewat jatuh tempo">${od}</span>` : `<span class="tag">${d.inv.items.filter(x => x.amount).length}</span>`;
     }
     return `<button class="nav-btn" type="button" data-page="${p.id}" title="${esc(p.name)}" ${state.page === p.id ? 'aria-current="page"' : ""}>${p.icon}<span class="lbl">${esc(p.name)}</span>${tag}</button>`;
   }).join("");
@@ -899,23 +913,22 @@ function plTotals(jobs){
   return { sales, cost, costOfSold, margin, pct: sales ? margin / sales : null, qty, nSales: withSales.length, nNoSales: jobs.length - withSales.length };
 }
 function invTotals(items){
-  const open = items.filter(i => !i.isPaid);
+  const open = items.filter(i => !i.isPaid && i.outstanding > 0);
   const sum = a => a.reduce((s,i) => s + (i.outstanding || 0), 0);
   const overdue = open.filter(i => i.days > 0);
   const soon = open.filter(i => i.days != null && i.days <= 0 && i.days >= -7);
-  return { total: items.reduce((s,i) => s + (i.amount || 0), 0), open: sum(open), nOpen: open.length, overdue: sum(overdue), nOverdue: overdue.length, soon: sum(soon), nSoon: soon.length };
+  return { total: items.reduce((s,i) => s + (i.amount || 0), 0), nItems: items.filter(i => i.amount).length, open: sum(open), nOpen: open.length, overdue: sum(overdue), nOverdue: overdue.length, soon: sum(soon), nSoon: soon.length };
 }
 
-/* kontainer: job dengan tanggal stuffing/bongkar sampai hari ini dihitung sudah dikerjakan */
+/* kontainer: semua job di tab PL dihitung (jumlah kolom Qty), sama dengan total di spreadsheet */
 function containerStats(jobs){
-  const today = new Date(); today.setHours(23, 59, 59, 999);
-  const done = jobs.filter(j => !j.date || j.date <= today), plan = jobs.filter(j => j.date && j.date > today);
+  const done = jobs;
   const q = a => a.reduce((s,j) => s + (j.qty || 0), 0);
   const sizeOf = j => (j.size || "Lainnya").toUpperCase();
   const sizes = {};
   for (const j of done) if (j.qty) sizes[sizeOf(j)] = (sizes[sizeOf(j)] || 0) + j.qty;
   const teu = Object.entries(sizes).reduce((s,[k,v]) => s + v * (/40|45/.test(k) ? 2 : 1), 0);
-  return { done: q(done), plan: q(plan), nDone: done.length, sizes, teu, doneJobs: done, sizeOf };
+  return { done: q(done), nDone: done.length, sizes, teu, doneJobs: done, sizeOf };
 }
 const fmtBox = n => (n || 0).toLocaleString("id-ID") + " kontainer";
 
@@ -925,27 +938,34 @@ function renderPL(sh, d){
   const f = state.filters;
   const q = f.q.toLowerCase();
   const jobs = all.filter(j => (!f.month || monthKey(j.date) === f.month) &&
-    (!q || [j.id, j.ship, j.desc, j.rcl, ...j.lines.map(l => l.vendor + " " + l.name)].join(" ").toLowerCase().includes(q)));
+    (!q || [j.id, j.ship, j.desc, j.rcl, j.customer, ...j.lines.map(l => l.vendor + " " + l.name)].join(" ").toLowerCase().includes(q)));
   const t = plTotals(jobs);
+  // tanpa filter: pakai baris total di tab PL agar angkanya sama persis dengan spreadsheet
+  if (!f.month && !q && d.pl.sumRow){
+    const sv = k => d.pl.idx[k] >= 0 ? parseNum(d.pl.sumRow[d.pl.idx[k]]) : null;
+    if (sv("sales") != null) t.sales = sv("sales");
+    if (sv("cost") != null) t.cost = sv("cost");
+    if (sv("profit") != null){ t.margin = sv("profit"); t.pct = t.sales ? t.margin / t.sales : t.pct; }
+  }
   const lines = jobs.flatMap(j => j.lines.map(l => ({ ...l, job: j.id })));
   const cs = containerStats(jobs);
   const sizeTxt = Object.entries(cs.sizes).map(([k,v]) => `${v} × ${esc(k)}`).join(" · ") || "Belum ada";
   const filt = `<div class="filters"><select id="fMonth" aria-label="Filter bulan"><option value="">Semua bulan</option>${months.map(m => `<option value="${m}" ${f.month === m ? "selected" : ""}>${monthLabel(m)}</option>`).join("")}</select><input id="fQ" type="search" placeholder="Cari job, kapal, vendor…" value="${esc(f.q)}" aria-label="Cari"></div>`;
-  let h = pageHead("Laporan Laba Rugi", sh.name, "Rincian sales, biaya, dan margin setiap Job Order. Klik baris job untuk melihat rincian biaya per vendor.", filt);
+  let h = pageHead("Laporan Laba Rugi", sh.name, "Rincian sales, biaya, dan profit setiap Job Order (tab PL). Klik baris job untuk melihat rincian biaya per vendor dari tab AP.", filt);
   h += errorBanner();
   h += `<div class="tiles">
-    ${tile("Kontainer Dikerjakan", cs.done.toLocaleString("id-ID"), sizeTxt + (cs.plan ? ` · ${cs.plan} terjadwal` : ""))}
-    ${tile("Jumlah Job", jobs.length.toLocaleString("id-ID"), `${cs.nDone} job selesai · ${cs.teu.toLocaleString("id-ID")} TEU`)}
+    ${tile("Kontainer Dikerjakan", cs.done.toLocaleString("id-ID"), sizeTxt)}
+    ${tile("Jumlah Job", jobs.length.toLocaleString("id-ID"), `${cs.teu.toLocaleString("id-ID")} TEU`)}
     ${tile("Total Sales", fmtRp(t.sales), t.nNoSales ? `${t.nNoSales} job belum ada sales` : "Semua job sudah ada sales")}
-    ${tile("Total Cost", fmtRp(t.cost), `${lines.filter(l => !l.total).length} baris biaya belum diisi`)}
-    ${tile("Gross Margin", fmtRp(t.margin), t.pct != null ? `${fmtPct(t.pct)} dari sales` : "Dihitung setelah sales diisi", t.nSales ? (t.margin >= 0 ? "pos" : "neg") : "")}
+    ${tile("Total Expense", fmtRp(t.cost), `Expense, sebelum VAT`)}
+    ${tile("Profit", fmtRp(t.margin), t.pct != null ? `${fmtPct(t.pct)} dari sales` : "Dihitung setelah sales diisi", t.nSales ? (t.margin >= 0 ? "pos" : "neg") : "")}
     ${(() => { const cj = jobs.filter(j => j.totalCost > 0), cq = cj.reduce((s,j) => s + (j.qty || 0), 0); return tile("Cost / Kontainer", cq ? fmtRp(cj.reduce((s,j) => s + j.totalCost, 0) / cq) : "—", `Rata-rata ${cj.length} job yang biayanya sudah diisi`); })()}
   </div>`;
   const nJ = isPhone() ? 6 : 12;
   h += `<div class="grid">
     <section class="card span-7"><div class="card-head"><h2>Sales vs Cost per Job</h2><div class="legend"><span><i style="background:var(--s1)"></i>Sales</span><span><i style="background:var(--s2)"></i>Total Cost</span></div></div>
       <div class="chart">${jobs.length ? groupedBars(jobs.slice(-nJ).map(j => ({ label: j.id, sub: (j.qty ? j.qty + "×" : "") + (j.size || "") })), [{ name: "Sales", color: "var(--s1)", values: jobs.slice(-nJ).map(j => j.sales) }, { name: "Total Cost", color: "var(--s2)", values: jobs.slice(-nJ).map(j => j.totalCost) }], { label: "Sales dan cost per job", annot: jobs.slice(-nJ).map(j => j.marginPct != null && j.totalCost > 0 ? fmtPct(j.marginPct) : "") }) : `<div class="empty"><p>Tidak ada job yang cocok dengan filter.</p></div>`}</div></section>
-    <section class="card span-5"><div class="card-head"><h2>Biaya per Vendor</h2><p>Total cost termasuk VAT</p></div>${hbars(sumBy(lines.filter(l => l.total), l => l.vendor, l => l.total).slice(0, 8))}</section>
+    <section class="card span-5"><div class="card-head"><h2>Biaya per Vendor</h2><p>Expense dari tab AP, sebelum VAT</p></div>${hbars(sumBy(lines.filter(l => l.total), l => l.vendor, l => l.total).slice(0, 8))}</section>
   </div>`;
   const mKeys = [...new Set(cs.doneJobs.map(j => monthKey(j.date)).filter(Boolean))].sort().slice(-6);
   const sizeKeys = Object.keys(cs.sizes).sort().slice(0, 3);
@@ -957,23 +977,50 @@ function renderPL(sh, d){
         { label: "Kontainer dikerjakan per bulan", h: 230, minStep: 1, fmt: fmtBox, axis: v => String(v), annot: mKeys.map(k => isPhone() ? String(boxIn(k)) : fmtBox(boxIn(k))) })
     : `<div class="empty"><p>Belum ada kontainer yang dikerjakan.</p></div>`;
   h += `<div class="grid"><section class="card span-5"><div class="card-head"><h2>Kontainer Dikerjakan per Bulan</h2><div class="legend">${sizeKeys.map((s,i) => `<span><i style="background:${sCol[i]}"></i>${esc(s)}</span>`).join("")}</div></div>
-    <div class="chart">${boxChart}</div><p class="small" style="margin:8px 0 0">Dari kolom JML dan SIZE, untuk job dengan tanggal stuffing/bongkar sampai hari ini.</p></section>`;
-  h += `<section class="card span-7"><div class="card-head"><h2>Biaya per Jenis</h2><p>Berdasarkan kolom Nama Biaya</p></div>${hbars(sumBy(lines.filter(l => l.total), l => l.name, l => l.total).slice(0, 10), "var(--s3)")}</section></div>`;
+    <div class="chart">${boxChart}</div><p class="small" style="margin:8px 0 0">Dari kolom Qty dan Size di tab PL, per bulan Stuffing Date.</p></section>`;
+  h += `<section class="card span-7"><div class="card-head"><h2>Biaya per Jenis</h2><p>Berdasarkan kolom DESC di tab AP</p></div>${hbars(sumBy(lines.filter(l => l.total), l => l.name, l => l.total).slice(0, 10), "var(--s3)")}</section></div>`;
 
-  h += `<section class="card"><div class="card-head"><h2>Rincian Job Order</h2><p>${jobs.length} job · klik untuk membuka rincian biaya</p></div><div class="tbl-wrap"><table class="rtable">
-    <thead><tr><th>No. Order</th><th>Tgl Stuffing/Bongkar</th><th>DO / Kapal</th><th>Deskripsi</th><th>Qty</th><th class="r">Sales</th><th class="r">Total Cost</th><th class="r">Margin</th><th class="r">%</th><th>Inv. RCL</th><th>Status</th></tr></thead><tbody>`;
-  if (!jobs.length) h += `<tr><td colspan="11"><div class="empty"><p>Tidak ada job yang cocok dengan filter.</p></div></td></tr>`;
+  const sheetOrder = !f.month && !q;
+  const nc = numericCols(d.pl.cols, all.map(j => j.raw));
+  const span = d.pl.cols.length + 1;
+  h += `<section class="card"><div class="card-head"><h2>Rincian Job Order</h2><p>${jobs.length} job · kolom sama dengan tab ${esc(sh.tab || sh.name)} · klik untuk membuka rincian biaya dari tab AP</p></div><div class="tbl-wrap"><table class="rtable">
+    <thead><tr>${d.pl.cols.map(c => `<th class="${nc.has(c.i) ? "r" : ""}">${esc(c.name)}</th>`).join("")}<th>Status</th></tr></thead><tbody>`;
+  if (sheetOrder && d.pl.sumRow) h += `<tr class="tot">${sheetCells(d.pl.cols, d.pl.sumRow, nc, "Total")}<td></td></tr>`;
+  if (!jobs.length) h += `<tr><td colspan="${span}"><div class="empty"><p>Tidak ada job yang cocok dengan filter.</p></div></td></tr>`;
   for (const j of jobs){
     const open = state.expanded.has(j.id);
-    h += `<tr class="job" data-job="${esc(j.id)}" aria-expanded="${open}" tabindex="0"><td><span class="caret">▸</span><span class="jo">${esc(j.id)}</span></td><td class="num">${fmtDate(j.date)}</td><td>${esc(j.ship)}</td><td>${esc(j.desc)}</td><td class="num">${j.qty ?? ""}${j.size ? " × " + esc(j.size) : ""}</td><td class="r num">${fmtRp(j.sales)}</td><td class="r num">${fmtRp(j.totalCost)}</td><td class="r num ${j.margin < 0 ? "neg" : j.margin > 0 ? "pos" : ""}">${fmtRp(j.margin)}</td><td class="r num">${fmtPct(j.marginPct)}</td><td class="mono">${esc(j.rcl) || '<span class="small">—</span>'}</td><td><span class="pill ${j.status.c}">${esc(j.status.t)}</span></td></tr>`;
+    h += `<tr class="job" data-job="${esc(j.id)}" aria-expanded="${open}" tabindex="0">${sheetCells(d.pl.cols, j.raw, nc, "", true)}<td><span class="pill ${j.status.c}">${esc(j.status.t)}</span></td></tr>`;
     if (open){
-      h += `<tr class="lines"><td colspan="11"><table class="rtable"><thead><tr><th>Dibayar ke</th><th>Nama Biaya</th><th class="r">Cost</th><th class="r">VAT</th><th class="r">Total Cost</th><th>Vendor Invoice</th></tr></thead><tbody>`;
-      h += j.lines.map(l => `<tr><td>${esc(l.vendor) || '<span class="small">—</span>'}</td><td>${esc(l.name)}</td><td class="r num">${l.cost != null ? fmtRp(l.cost) : '<span class="small">belum diisi</span>'}</td><td class="r num">${l.vat ? fmtRp(l.vat) : "—"}</td><td class="r num">${l.total ? fmtRp(l.total) : '<span class="pill p-warn">belum diisi</span>'}</td><td class="mono">${esc(l.vinv) || '<span class="small">—</span>'}</td></tr>`).join("");
-      h += `<tr class="tot"><td colspan="4"><b>Total biaya ${esc(j.id)}</b></td><td class="r num"><b>${fmtRp(j.totalCost)}</b></td><td></td></tr></tbody></table></td></tr>`;
+      h += `<tr class="lines"><td colspan="${span}"><table class="rtable"><thead><tr><th>Vendor</th><th>Deskripsi</th><th class="r">Expense</th><th class="r">Input VAT</th><th class="r">Net Payable</th><th>Vendor Invoice</th></tr></thead><tbody>`;
+      h += j.lines.length ? j.lines.map(l => `<tr><td>${esc(l.vendor) || '<span class="small">—</span>'}</td><td>${esc(l.name)}</td><td class="r num">${l.cost != null ? fmtRp(l.cost) : '<span class="small">belum diisi</span>'}</td><td class="r num">${l.vat ? fmtRp(l.vat) : "—"}</td><td class="r num">${l.net ? fmtRp(l.net) : '<span class="pill p-warn">belum diisi</span>'}</td><td class="mono">${esc(l.vinv) || '<span class="small">—</span>'}</td></tr>`).join("")
+        : `<tr><td colspan="6"><span class="small">Belum ada biaya untuk ${esc(j.id)} di tab AP.</span></td></tr>`;
+      if (j.lines.length) h += `<tr class="tot"><td colspan="2"><b>Total biaya ${esc(j.id)}</b></td><td class="r num"><b>${fmtRp(j.lines.reduce((s,l) => s + (l.cost || 0), 0))}</b></td><td class="r num">${fmtRp(j.lines.reduce((s,l) => s + (l.vat || 0), 0))}</td><td class="r num"><b>${fmtRp(j.lines.reduce((s,l) => s + (l.net || 0), 0))}</b></td><td></td></tr>`;
+      h += `</tbody></table></td></tr>`;
     }
   }
   h += `</tbody></table></div></section>`;
   return h;
+}
+
+/* tabel yang kolomnya mengikuti header di spreadsheet (urutan dan isi sel sama persis) */
+function headerCols(rows, hi){
+  return (rows[hi] || []).map((h, i) => ({ i, name: String(h ?? "").trim() })).filter(c => c.name);
+}
+function numericCols(cols, rows){
+  const out = new Set();
+  for (const c of cols){
+    const vals = rows.map(r => String(r?.[c.i] ?? "").trim()).filter(v => v && !/^[-—]+$/.test(v));
+    if (vals.length && vals.every(v => /^[(−-]?\s*(rp\.?\s*)?[\d.,\s]+%?\)?$/i.test(v))) out.add(c.i);
+  }
+  return out;
+}
+function sheetCells(cols, r, nc, firstFallback = "", caret = false){
+  return cols.map((c, k) => {
+    let v = String(r?.[c.i] ?? "").trim();
+    if (!k && !v && firstFallback) return `<td><b>${esc(firstFallback)}</b></td>`;
+    const neg = nc.has(c.i) && /^[(−-]\s*\d/.test(v);
+    return `<td class="${nc.has(c.i) ? "r num" : ""}${neg ? " neg" : ""}">${!k && caret ? '<span class="caret">▸</span><span class="jo">' + esc(v) + "</span>" : esc(v)}</td>`;
+  }).join("");
 }
 
 function renderInv(sh, d){
@@ -985,11 +1032,11 @@ function renderInv(sh, d){
     isAR ? "Tagihan ke pelanggan yang belum diterima, umur piutang, dan jadwal jatuh tempo." : "Tagihan dari vendor yang harus dibayar, umur hutang, dan jadwal jatuh tempo.");
   h += errorBanner();
   if (!items.length){
-    h += `<section class="card"><div class="empty"><b>Belum ada invoice di tab ${esc(sh.name)}</b><p>Isi kolom <code>INVOICE NUMBER</code>, <code>${party.toUpperCase()}</code>, <code>DATE</code>, <code>DUE DATE</code>, dan <code>AMOUNT</code> di spreadsheet. Dashboard akan menampilkan total, umur ${isAR ? "piutang" : "hutang"}, dan status jatuh tempo secara otomatis pada refresh berikutnya.</p><p style="margin-top:10px">Tips: tambahkan kolom <code>STATUS</code> (isi "Lunas") atau <code>PAID</code> agar invoice yang sudah dibayar tidak dihitung sebagai outstanding.</p></div></section>`;
+    h += `<section class="card"><div class="empty"><b>Belum ada data di tab ${esc(sh.tab || sh.name)}</b><p>Isi kolom <code>ORDER NUMBER</code>, <code>${party.toUpperCase()}</code>, <code>INVOICE NUMBER</code>, <code>INVOICE DATE</code>, <code>DUE DATE</code>, dan <code>${isAR ? "NET RECEIVABLE" : "NET PAYABLE"}</code> di spreadsheet. Dashboard akan menampilkan total, umur ${isAR ? "piutang" : "hutang"}, dan status jatuh tempo secara otomatis pada refresh berikutnya.</p><p style="margin-top:10px">Tips: tambahkan kolom <code>STATUS</code> (isi "Lunas") atau <code>PAID</code> agar invoice yang sudah dibayar tidak dihitung sebagai outstanding.</p></div></section>`;
     return h;
   }
   h += `<div class="tiles">
-    ${tile("Total Invoice", fmtRp(t.total), `${items.length} invoice`)}
+    ${tile("Total Invoice", fmtRp(t.total), `${t.nItems} tagihan`)}
     ${tile("Outstanding", fmtRp(t.open), `${t.nOpen} belum ${isAR ? "diterima" : "dibayar"}`)}
     ${tile("Lewat Jatuh Tempo", fmtRp(t.overdue), `${t.nOverdue} invoice`, t.nOverdue ? "neg" : "")}
     ${tile("Jatuh Tempo ≤ 7 Hari", fmtRp(t.soon), `${t.nSoon} invoice`)}
@@ -1000,10 +1047,11 @@ function renderInv(sh, d){
   h += `<div class="grid"><section class="card span-6"><div class="card-head"><h2>Umur ${isAR ? "Piutang" : "Hutang"}</h2><p>Nilai outstanding per kelompok umur</p></div>
     <div class="hbar">${aging.map(a => `<div class="hb-row" data-tip="${esc(a.k)}: <b>${esc(fmtRp(a.v))}</b><br>${a.n} invoice"><span class="nm">${esc(a.k)} <span class="small">· ${a.n}</span></span><span class="vl">${esc(fmtRpShort(a.v))}</span><div class="hb-track"><div class="hb-fill" style="width:${Math.max(1.5, a.v/maxA*100)}%;background:${a.c}"></div></div></div>`).join("") || '<div class="empty"><p>Semua invoice sudah lunas.</p></div>'}</div></section>
     <section class="card span-6"><div class="card-head"><h2>Outstanding per ${party}</h2><p>8 terbesar</p></div>${hbars(sumBy(items.filter(i => !i.isPaid), i => i.party, i => i.outstanding).filter(x => x.v > 0).slice(0, 8), isAR ? "var(--s1)" : "var(--s2)")}</section></div>`;
-  const sorted = items.slice().sort((a, b) => (a.isPaid - b.isPaid) || ((a.due?.getTime() ?? 9e15) - (b.due?.getTime() ?? 9e15)));
-  h += `<section class="card"><div class="card-head"><h2>Daftar Invoice</h2><p>Diurutkan dari jatuh tempo terdekat</p></div><div class="tbl-wrap"><table class="rtable"><thead><tr><th>Invoice Number</th><th>${party}</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="r">Amount</th><th class="r">Outstanding</th><th>Status</th></tr></thead><tbody>`;
-  h += sorted.map(i => `<tr><td class="mono">${esc(i.inv) || '<span class="small">—</span>'}</td><td>${esc(i.party)}</td><td class="num">${fmtDate(i.date)}</td><td class="num">${fmtDate(i.due)}</td><td class="r num">${fmtRp(i.amount)}</td><td class="r num">${fmtRp(i.outstanding)}</td><td><span class="pill ${i.pill.c}">${esc(i.pill.t)}</span></td></tr>`).join("");
-  h += `<tr class="tot"><td colspan="4"><b>Total</b></td><td class="r num"><b>${fmtRp(t.total)}</b></td><td class="r num"><b>${fmtRp(t.open)}</b></td><td></td></tr></tbody></table></div></section>`;
+  const nc = numericCols(d.inv.cols, items.map(i => i.raw));
+  h += `<section class="card"><div class="card-head"><h2>Daftar ${isAR ? "Piutang" : "Hutang"}</h2><p>${items.length} baris · kolom dan urutan sama dengan tab ${esc(sh.tab || sh.name)}</p></div><div class="tbl-wrap"><table class="rtable"><thead><tr>${d.inv.cols.map(c => `<th class="${nc.has(c.i) ? "r" : ""}">${esc(c.name)}</th>`).join("")}<th>Status</th></tr></thead><tbody>`;
+  if (d.inv.sumRow) h += `<tr class="tot">${sheetCells(d.inv.cols, d.inv.sumRow, nc, "Total")}<td></td></tr>`;
+  h += items.map(i => `<tr>${sheetCells(d.inv.cols, i.raw, nc)}<td><span class="pill ${i.pill.c}">${esc(i.pill.t)}</span></td></tr>`).join("");
+  h += `</tbody></table></div></section>`;
   return h;
 }
 
@@ -1078,7 +1126,7 @@ function draftFromJob(mode, j){
   const seq = ((j && j.id.match(/\d+/)) || ["1"])[0].padStart(3, "0");
   const items = j ? [{ d: ("Jasa pengiriman " + (j.desc || "").replace(/^pengirimans*/i, "")).trim() + (j.ship ? ` (${j.ship})` : ""), q: j.qty || 1, u: j.size ? `Cont ${j.size}` : "Container", p: j.sales ? Math.round(j.sales / (j.qty || 1)) : 0 }]
                   : [{ d: "Jasa pengiriman kontainer door to door", q: 1, u: "Cont 20FT", p: 0 }];
-  const common = { date: isoDate(today), to: { name: "", address: "", attn: "" }, jo: j?.id || "", ship: j?.ship || "", route: j?.desc || "", stuff: isoDate(j?.date), qtySize: j ? `${j.qty || ""} × ${j.size || ""}`.trim() : "", items, ppn: 1.1 };
+  const common = { date: isoDate(today), to: { name: j?.customer || "", address: "", attn: "" }, jo: j?.id || "", ship: j?.ship || "", route: j?.desc || "", stuff: isoDate(j?.date), qtySize: j ? `${j.qty || ""} × ${j.size || ""}`.trim() : "", items, ppn: 1.1 };
   if (mode === "inv") return { ...common, no: j?.rcl || `${seq}/RCL-INV/${roman}/${yr}`, terms: 30, due: isoDate(addDays(today, 30)), ref: "",
     notes: "Mohon cantumkan nomor invoice pada berita transfer.\nPembayaran dianggap lunas setelah dana efektif diterima di rekening kami." };
   return { ...common, no: `${seq}/RCL-QUO/${roman}/${yr}`, valid: isoDate(addDays(today, 14)),
@@ -1357,28 +1405,32 @@ async function loadAll(manual = false){
   state.loading = true;
   $("#refresh").classList.add("spin"); $("#refresh2").classList.add("spin");
   setLive("busy", "Mengambil data…");
+  const first = !state.lastOk;
+  let changed = false;
   try {
     const found = await discoverSheets();
     if (found) state.sheets = found;
-    let changed = false, okCount = 0, lastErr = null;
+    let okCount = 0, lastErr = null;
     await Promise.all(state.sheets.map(async sh => {
       try {
         const rows = await fetchSheet(sh.gid);
         const sig = JSON.stringify(rows);
-        if (state.sigs[sh.gid] && state.sigs[sh.gid] !== sig) changed = true;
+        if (state.sigs[sh.gid] !== sig) changed = true;
         state.sigs[sh.gid] = sig;
-        const kind = detectKind(rows);
+        const kind = sh.kind === "pl" ? "pl" : sh.kind ? "inv" : detectKind(rows);
         const d = { kind, rows };
         if (kind === "pl") d.pl = interpretPL(rows);
-        if (kind === "inv") d.inv = interpretInv(rows, sh.name);
+        if (kind === "inv") d.inv = interpretInv(rows, sh.kind || (/hutang|payable|ap/i.test(sh.name) ? "ap" : "ar"));
         state.data[sh.gid] = d; okCount++;
       } catch(e){ lastErr = e; if (!state.data[sh.gid]) state.data[sh.gid] = { error: e.message }; }
     }));
     if (!okCount) throw lastErr || new Error("Tidak ada data");
+    const ap = findData("inv", "ap")[0], ar = findData("inv", "ar")[0];
+    for (const x of findData("pl")) finishPL(x.d.pl, ap && ap.d.inv, ar && ar.d.inv);
     state.error = lastErr ? lastErr.message : null;
     state.lastOk = new Date();
     setLive(lastErr ? "err" : "ok", lastErr ? "Sebagian tab gagal" : "Live · terhubung");
-    if (changed) toast("Data spreadsheet berubah, dashboard sudah diperbarui.");
+    if (changed && !first) toast("Data spreadsheet berubah, dashboard sudah diperbarui.");
     else if (manual) toast("Data sudah yang terbaru.");
   } catch(e){
     state.error = e.message || String(e);
@@ -1389,7 +1441,8 @@ async function loadAll(manual = false){
     $("#updated").textContent = state.lastOk ? "Diperbarui " + state.lastOk.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "Belum dimuat";
     if (!isDocPage(state.page) && !(state.page === USERS_PAGE && isAdmin()) && !state.sheets.some(s => slug(s.name) === state.page)) state.page = defaultPage();
     renderNav();
-    if (!(isDocPage(state.page) && $("#docPage")) && !(state.page === USERS_PAGE && $("#usersPage"))) renderPage();   // editor dokumen tidak di-render ulang saat auto-refresh
+    // halaman hanya digambar ulang bila data berubah, agar posisi scroll tabel tidak lompat setiap auto-refresh
+    if ((changed || manual || first || state.error) && !(isDocPage(state.page) && $("#docPage")) && !(state.page === USERS_PAGE && $("#usersPage"))) renderPage();   // editor dokumen tidak di-render ulang saat auto-refresh
   }
 }
 
@@ -1402,6 +1455,11 @@ function schedule(){
 $("#interval").value = store.get("interval") ?? String(CONFIG.DEFAULT_REFRESH_SEC);
 $("#interval").addEventListener("change", e => { store.set("interval", e.target.value); schedule(); });
 $("#refresh").addEventListener("click", () => loadAll(true));
+// ambil data terbaru begitu dashboard dibuka/difokuskan lagi (mis. setelah mengisi spreadsheet di tab lain)
+let lastFocusLoad = 0;
+const loadOnReturn = () => { if (!document.hidden && Date.now() - lastFocusLoad > 3000){ lastFocusLoad = Date.now(); loadAll(); } };
+document.addEventListener("visibilitychange", loadOnReturn);
+addEventListener("focus", loadOnReturn);
 $("#refresh2").addEventListener("click", () => loadAll(true));
 document.addEventListener("visibilitychange", () => { if (!document.hidden && state.lastOk && Date.now() - state.lastOk > 30000) loadAll(); });
 $("#menuBtn").addEventListener("click", () => $("#app").classList.toggle("open"));
