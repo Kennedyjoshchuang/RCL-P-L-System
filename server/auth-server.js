@@ -90,6 +90,38 @@ const fails = new Map();
 // 5 wrong passwords per username, 30 per IP (a whole office can share one IP) -> 5 min pause
 function limited(key) { const r = fails.get(key), max = key.startsWith("ip:") ? 30 : 5; return r && r.n >= max && Date.now() - r.t < 5 * 60e3; }
 function fail(key) { const r = fails.get(key); if (!r || Date.now() - r.t > 5 * 60e3) fails.set(key, { n: 1, t: Date.now() }); else r.n++; }
+// drop expired entries so random usernames cannot grow the map without bound
+setInterval(() => { const now = Date.now(); for (const [k, r] of fails) if (now - r.t > 5 * 60e3) fails.delete(k); }, 60e3).unref();
+
+/* ---------- Google Sheets, read server-side with a server-held OAuth token (the sheet is not public) ---------- */
+// SHEET_ID from env; creds = authorized_user JSON {client_id, client_secret, refresh_token, scopes}, via systemd LoadCredential=gsheets:...
+const SHEET_ID = process.env.SHEET_ID || "";
+const TABS = new Set(["PL", "AR", "AP"]);
+const GCREDS = process.env.GOOGLE_CREDS_FILE || path.join(process.env.CREDENTIALS_DIRECTORY || "/nonexistent", "gsheets");
+let gTok = { v: "", exp: 0 };
+async function googleToken() {
+  if (gTok.exp > Date.now() + 60e3) return gTok.v;
+  const c = JSON.parse(fs.readFileSync(GCREDS, "utf8"));
+  const scope = (c.scopes || []).find(s => s.endsWith("/spreadsheets.readonly")) || "https://www.googleapis.com/auth/spreadsheets";
+  const r = await fetch("https://oauth2.googleapis.com/token", { method: "POST", body: new URLSearchParams({ grant_type: "refresh_token", client_id: c.client_id, client_secret: c.client_secret, refresh_token: c.refresh_token, scope }) });
+  if (!r.ok) throw new Error("google token HTTP " + r.status);
+  const j = await r.json(); gTok = { v: j.access_token, exp: Date.now() + j.expires_in * 1000 };
+  return gTok.v;
+}
+// one shared 15 s cache for all users keeps us far below the Sheets API quota (60 reads/min per user)
+const tabCache = new Map();
+function readTab(tab) {
+  const hit = tabCache.get(tab);
+  if (hit && Date.now() - hit.t < 15e3) return hit.p;
+  const p = (async () => {
+    const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab)}?valueRenderOption=FORMATTED_VALUE`, { headers: { Authorization: "Bearer " + await googleToken() } });
+    if (!r.ok) throw new Error("sheets HTTP " + r.status);
+    const rows = (await r.json()).values || [], w = rows.reduce((m, x) => Math.max(m, x.length), 0);
+    return rows.map(x => x.concat(Array(w - x.length).fill("")));   // pad rows like the CSV export did
+  })();
+  tabCache.set(tab, { t: Date.now(), p }); p.catch(() => tabCache.delete(tab));
+  return p;
+}
 
 /* ---------- validation (same rules as the UI) ---------- */
 const normUser = s => String(s || "").trim().toLowerCase();
@@ -167,7 +199,21 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { user: pub(u) });
     }
 
-    if (p === "/api/auth/logout" && req.method === "POST") { setCookie(res, "", 0); return send(res, 200, { ok: true }); }
+    if (p === "/api/auth/logout" && req.method === "POST") {
+      // bump ver so a copied cookie stops working too (logs this user out on all devices)
+      if (me) { const list = loadUsers(), u = list.find(x => x.u === me.u); if (u) { u.ver = (u.ver || 0) + 1; saveUsers(list); } }
+      setCookie(res, "", 0); return send(res, 200, { ok: true });
+    }
+
+    // ---- sheet data: any logged-in user ----
+    const sm = p.match(/^\/api\/sheet\/([^/]+)$/);
+    if (sm && req.method === "GET") {
+      if (!me) return send(res, 401, { error: "Sesi berakhir. Silakan masuk lagi." });
+      if (sm[1] === "open") { res.writeHead(302, { Location: `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`, "Cache-Control": "no-store" }); return res.end(); }
+      if (!TABS.has(sm[1])) return send(res, 404, { error: "not found" });
+      try { return send(res, 200, { rows: await readTab(sm[1]) }); }
+      catch (e) { console.error("sheet", sm[1], e.message); return send(res, 502, { error: "Gagal membaca spreadsheet." }); }
+    }
 
     // ---- everything below needs a logged-in admin ----
     if (!p.startsWith("/api/users")) return send(res, 404, { error: "not found" });

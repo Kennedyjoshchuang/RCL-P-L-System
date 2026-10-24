@@ -542,16 +542,14 @@ document.getElementById("logoFull").src=LOGO_FULL;document.getElementById("logoM
 /* =========================================================
    KONFIGURASI
    ---------------------------------------------------------
-   SHEET_ID  : ID Google Spreadsheet (bagian di antara /d/ dan /edit pada link)
+   ID spreadsheet disimpan di server (env SHEET_ID), tidak di halaman ini.
    SHEETS    : halaman dashboard dan tab spreadsheet yang dibaca.
                name = nama halaman, tab = nama tab di spreadsheet,
                kind = jenis data (pl / ar / ap).
-               gid  = cadangan bila nama tab tidak bisa dicari
-                      (angka setelah "gid=" pada link tab).
+               gid  = kunci internal halaman (angka setelah "gid=" pada link tab).
                Rincian biaya per JO di halaman P/L diambil dari tab AP.
    ========================================================= */
 const CONFIG = {
-  SHEET_ID: "1W1FQCTSYdop9HMhvN2t7k-xUYo55mAHH2p9QSx6y1Zw",
   SHEETS: [
     { name: "P/L",     tab: "PL", kind: "pl", gid: "901012587" },
     { name: "Piutang", tab: "AR", kind: "ar", gid: "1339016650" },
@@ -560,7 +558,6 @@ const CONFIG = {
   DEFAULT_REFRESH_SEC: 15
 };
 
-const BASE = `https://docs.google.com/spreadsheets/d/${CONFIG.SHEET_ID}`;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 const store = { get(k){ try{ return localStorage.getItem("rcl:"+k); }catch(e){ return null; } }, set(k,v){ try{ localStorage.setItem("rcl:"+k,v); }catch(e){} } };
@@ -623,70 +620,16 @@ function parseDate(v, mdy = false){
   if (m) return new Date(+m[1], +m[2]-1, +m[3]);
   return null;
 }
-function parseCSV(text){
-  const rows = []; let row = [], f = "", q = false;
-  for (let i = 0; i < text.length; i++){
-    const c = text[i];
-    if (q){ if (c === '"'){ if (text[i+1] === '"'){ f += '"'; i++; } else q = false; } else f += c; }
-    else if (c === '"') q = true;
-    else if (c === ","){ row.push(f); f = ""; }
-    else if (c === "\n"){ row.push(f); rows.push(row); row = []; f = ""; }
-    else if (c !== "\r") f += c;
-  }
-  if (f !== "" || row.length){ row.push(f); rows.push(row); }
-  return rows;
-}
 const norm = s => String(s ?? "").toUpperCase().replace(/\s+/g," ").trim();
 const blank = r => !r || r.every(c => String(c ?? "").trim() === "");
 
 /* ---------------- data source ----------------
-   1) http(s): CSV export langsung (paling akurat)
-   2) fallback / file:// : JSONP Google Visualization (tidak butuh CORS)      */
-const canFetch = /^https?:$/.test(location.protocol);
-async function fetchCSV(gid){
-  const r = await fetch(`${BASE}/export?format=csv&gid=${gid}&_=${Date.now()}`, { cache: "no-store" });
-  if (!r.ok) throw new Error("HTTP " + r.status);
-  const t = await r.text();
-  if (/^\s*<!doctype html|<html/i.test(t)) throw new Error("Spreadsheet tidak publik");
-  return parseCSV(t);
-}
-let jsonpSeq = 0;
-function fetchJSONP(gid){
-  return new Promise((resolve, reject) => {
-    const cb = "__rcl_cb" + (++jsonpSeq);
-    const el = document.createElement("script");
-    const timer = setTimeout(() => { cleanup(); reject(new Error("Timeout")); }, 20000);
-    function cleanup(){ clearTimeout(timer); delete window[cb]; el.remove(); }
-    window[cb] = resp => {
-      cleanup();
-      if (!resp || resp.status === "error") return reject(new Error((resp?.errors?.[0]?.detailed_message) || "Gagal membaca sheet"));
-      // headers=1: baris pertama dikirim sebagai label kolom (agar teks header di kolom angka tidak hilang)
-      const head = (resp.table.cols || []).map(c => c.label || "");
-      const rows = (resp.table.rows || []).map(r => (r.c || []).map(c => c == null ? "" : (c.f != null ? c.f : (c.v == null ? "" : String(c.v)))));
-      resolve([head, ...rows]);
-    };
-    el.onerror = () => { cleanup(); reject(new Error("Spreadsheet tidak bisa diakses (pastikan Share: Anyone with the link)")); };
-    el.src = `${BASE}/gviz/tq?tqx=responseHandler:${cb};out:json&headers=1&gid=${gid}&_=${Date.now()}`;
-    document.head.appendChild(el);
-  });
-}
-async function fetchSheet(gid){
-  if (canFetch){ try { return await fetchCSV(gid); } catch(e){ /* fall through */ } }
-  return fetchJSONP(gid);
-}
-async function discoverSheets(){
-  if (!canFetch) return null;
-  try {
-    const r = await fetch(`${BASE}/htmlview?_=${Date.now()}`, { cache: "no-store" });
-    const t = await r.text();
-    const gidOf = {};
-    for (const m of t.matchAll(/\{name: "((?:[^"\\]|\\.)*)", pageUrl: "[^"]*?gid=(\d+)/g)){
-      const name = norm(JSON.parse('"' + m[1] + '"'));
-      if (!(name in gidOf)) gidOf[name] = m[2];
-    }
-    // hanya tab yang ada di CONFIG.SHEETS; gid dicari dari nama tab agar tetap benar bila tab dibuat ulang
-    return CONFIG.SHEETS.map(sh => ({ ...sh, gid: gidOf[norm(sh.tab)] || sh.gid }));
-  } catch(e){ return null; }
+   Data dibaca lewat server (/api/sheet/<tab>, wajib login); spreadsheet tidak dibagikan publik. */
+async function fetchSheet(tab){
+  const r = await fetch(`/api/sheet/${encodeURIComponent(tab)}`, { cache: "no-store", credentials: "same-origin" });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+  return j.rows;
 }
 
 /* ---------------- interpreters ---------------- */
@@ -897,7 +840,7 @@ function pageHead(eyebrow, title, sub, extra = ""){
 function tile(k, v, d = "", cls = ""){ return `<div class="tile ${cls}"><div class="k">${esc(k)}</div><div class="v">${v}</div>${d ? `<div class="d">${d}</div>` : ""}</div>`; }
 function errorBanner(){
   if (!state.error) return "";
-  return `<div class="banner"><span>⚠</span><div><b>Gagal mengambil data terbaru.</b> ${esc(state.error)}. ${state.lastOk ? "Menampilkan data terakhir yang berhasil dimuat." : ""} Pastikan spreadsheet dibagikan sebagai <i>Anyone with the link · Viewer</i> dan koneksi internet aktif.</div></div>`;
+  return `<div class="banner"><span>⚠</span><div><b>Gagal mengambil data terbaru.</b> ${esc(state.error)}. ${state.lastOk ? "Menampilkan data terakhir yang berhasil dimuat." : ""} Pastikan koneksi internet aktif; bila tetap gagal, hubungi admin.</div></div>`;
 }
 function findData(kind, sub){
   return state.sheets.map(sh => ({ sh, d: state.data[sh.gid] })).filter(x => x.d && x.d.kind === kind && (!sub || x.d.inv?.kind === sub));
@@ -1408,12 +1351,10 @@ async function loadAll(manual = false){
   const first = !state.lastOk;
   let changed = false;
   try {
-    const found = await discoverSheets();
-    if (found) state.sheets = found;
     let okCount = 0, lastErr = null;
     await Promise.all(state.sheets.map(async sh => {
       try {
-        const rows = await fetchSheet(sh.gid);
+        const rows = await fetchSheet(sh.tab);
         const sig = JSON.stringify(rows);
         if (state.sigs[sh.gid] !== sig) changed = true;
         state.sigs[sh.gid] = sig;
@@ -1464,7 +1405,7 @@ $("#refresh2").addEventListener("click", () => loadAll(true));
 document.addEventListener("visibilitychange", () => { if (!document.hidden && state.lastOk && Date.now() - state.lastOk > 30000) loadAll(); });
 $("#menuBtn").addEventListener("click", () => $("#app").classList.toggle("open"));
 document.addEventListener("click", e => { if ($("#app").classList.contains("open") && !e.target.closest("#side") && !e.target.closest("#menuBtn")) $("#app").classList.remove("open"); });
-$("#sheetLink").href = `${BASE}/edit`;
+$("#sheetLink").href = "/api/sheet/open";
 
 function setTheme(t){
   document.documentElement.setAttribute("data-theme", t);
