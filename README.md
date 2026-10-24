@@ -1,6 +1,6 @@
 # RCL P/L System
 
-Dashboard laporan kegiatan **PT. Raya Cakrawala Logistik**. Data dibaca langsung (live) dari Google Sheets.
+Dashboard laporan kegiatan **PT. Raya Cakrawala Logistik**. Data dibaca (live) dari Google Sheets lewat server, hanya setelah login.
 
 ## Halaman
 - **Login** — akun disimpan di server dan sama untuk semua perangkat. Saat server pertama kali dipakai, buat akun admin; setelah itu semua orang masuk dengan username & password dari admin
@@ -26,6 +26,9 @@ lalu buka http://localhost:5173/. Server lokal menyimpan akun di `server/data/` 
 - 5 kali salah password per username → dikunci 5 menit.
 
 ## Konfigurasi
-Atur `CONFIG.SHEET_ID` di bagian `<script>` pada `dashboard-rcl.html`. Spreadsheet harus dibagikan sebagai **Anyone with the link · Viewer**.
+Data dibaca oleh server, bukan oleh browser: `GET /api/sheet/PL|AR|AP` (wajib login) memanggil Google Sheets API dengan token server. Spreadsheet **tidak** dibagikan publik (Share: Restricted); cukup dibagikan *Viewer* ke akun Google pemilik token.
+- `SHEET_ID` (env): ID spreadsheet.
+- Kredensial: file JSON `authorized_user` (`client_id`, `client_secret`, `refresh_token`, `scopes`), diberikan lewat systemd `LoadCredential=gsheets:/etc/rcl-pl/google-sheets.json` (root 0600), atau `GOOGLE_CREDS_FILE=<path>` saat lokal.
+- Lokal: `SHEET_ID=... GOOGLE_CREDS_FILE=... npm run dev`.
 
 Draf invoice/quotation dan data kop surat disimpan di browser (localStorage) masing-masing perangkat.
